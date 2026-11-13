@@ -1,0 +1,44 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: mqm-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot job: wipes and re-seeds the database, then exits.
+  seed:
+    build: ./testbed
+    command: ["node", "seed/seed.js"]
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: testbed
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  app:
+    build: ./testbed
+    container_name: mqm-app
+    ports:
+      - "3000:3000"
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: testbed
+      PORT: 3000
+      # none | sanitizer | regex | mqm  (see testbed/app/protections/)
+      PROTECTION: ${PROTECTION:-none}
+      # MQM only: learn | enforce
+      MQM_MODE: ${MQM_MODE:-learn}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+volumes:
+  mongo-data:
