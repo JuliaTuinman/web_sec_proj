@@ -1,0 +1,15 @@
+{
+  "name": "mqm-testbed",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Intentionally vulnerable Express + MongoDB app. DO NOT DEPLOY.",
+  "scripts": {
+    "start": "node app/server.js",
+    "seed": "node seed/seed.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "express-mongo-sanitize": "^2.2.0",
+    "mongodb": "^6.8.0"
+  }
+}
