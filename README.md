@@ -8,7 +8,7 @@ testbed/
   app/routes.js           4 vulnerable endpoints: /login /search /profile /filter
   app/db.js               ONE place the DB handle is created -> MQM wraps it here
   app/protections/        pluggable defenses chosen by PROTECTION env var
-  seed/seed.js            deterministic reseed (10 users, 24 products)
+  seed/seed.js            deterministic reseed (10 users, 26 products)
   smoke-test.sh           normal + attack request for each endpoint
 ```
 

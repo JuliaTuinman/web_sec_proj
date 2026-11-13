@@ -42,7 +42,7 @@ router.get('/profile', h(async (req, res) => {
 // 4. FILTER - category filter built by string concatenation inside $where
 //    (server-side JavaScript injection).
 //    Normal:  GET /filter?category=electronics&maxPrice=500
-//    Attack:  GET /filter?category=x'%7C%7C'1'=='1&maxPrice=0
+//    Attack:  GET /filter?category=x'%7C%7Ctrue%7C%7C'a&maxPrice=0
 router.get('/filter', h(async (req, res) => {
   const { category, maxPrice } = req.query;
   const products = await getDb().collection('products')
