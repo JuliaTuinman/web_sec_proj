@@ -35,8 +35,15 @@ services:
       PORT: 3000
       # none | sanitizer | regex | mqm  (see testbed/app/protections/)
       PROTECTION: ${PROTECTION:-none}
-      # MQM only: learn | enforce
+      # MQM only: learn | enforce | monitor  (see testbed/app/protections/mqm.js for all options)
       MQM_MODE: ${MQM_MODE:-learn}
+      MQM_SITE_KEY: ${MQM_SITE_KEY:-callsite}
+      MQM_UNKNOWN: ${MQM_UNKNOWN:-block}
+      MQM_LOG: /usr/src/testbed/mqm-data/blocked.jsonl
+    volumes:
+      # MQM's learned model (and block log) live on the host, so a model learned in
+      # learn mode survives the container restart into enforce mode
+      - ./testbed/mqm-data:/usr/src/testbed/mqm-data
     depends_on:
       seed:
         condition: service_completed_successfully

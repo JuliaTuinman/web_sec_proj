@@ -13,7 +13,7 @@ regex filter, MQM), and the evaluation harness.
 | Piece | Owner | State |
 |---|---|---|
 | Testbed app, Docker, seed data | Julia | Done, smoke-tested |
-| MQM (driver wrapping, shapes, modes) | teammate | TODO: `protections/mqm.js` |
+| MQM (driver wrapping, shapes, modes) | Philip | Done, unit + end-to-end tested (`npm test`) |
 | Payloads, baselines, traffic generator | teammate | TODO: `protections/regex.js` (sanitizer already in) |
 | Test harness, metrics, results table | teammate | TODO |
 
@@ -63,6 +63,53 @@ testbed/
 
 Normal query shapes (what MQM should learn): login = `{username: string, password: string}`;
 search = `{name: string}`; profile = `{username: string}`; filter = `{$where: string}` with a text category and a number.
+
+## MQM detector
+Code: `testbed/app/protections/mqm.js` (entry, reads env) and `testbed/app/protections/mqm/`:
+
+| File | Role |
+|---|---|
+| `guard.js` | wraps `db.collection()` so `find`, `findOne`, `updateOne`, `aggregate`, ... call `check()` first; learn/enforce/monitor logic |
+| `shape.js` | query -> shape: keeps fields, operators, value types; drops values; arrays become the set of element shapes |
+| `js-structure.js` | `$where` JavaScript -> token structure with literals replaced (`this . category == STR && this . price <= NUM`) |
+| `callsite.js` | query-site key = `<collection>.<method>@<file>:<line>` of the app code that issued the query |
+| `diff.js` | explains a block against the closest learned shape (`NEW_OPERATOR`, `TYPE_MISMATCH`, `JS_STRUCTURE`, ...) |
+| `model.js` | learned model, saved as readable JSON |
+
+Learn, then enforce:
+```
+PROTECTION=mqm MQM_MODE=learn docker compose up --build -d
+./testbed/learn-traffic.sh        # sends ONLY benign traffic to every endpoint
+PROTECTION=mqm MQM_MODE=enforce docker compose up -d --force-recreate app
+./testbed/smoke-test.sh
+```
+Skipping the learn step (or editing `routes.js`, since site keys include line numbers) leaves MQM with no matching
+model, so **every** query, normal ones included, is blocked with "query site never seen in learn mode".
+Delete `testbed/mqm-data/model.json` and relearn. If you add an endpoint, add benign requests for it to `learn-traffic.sh`.
+The model is written to `testbed/mqm-data/model.json` (bind-mounted, gitignored), so it survives the restart.
+New shapes are saved immediately; counts are flushed within 1 s. Learning adds to an existing model: delete the file
+(or point `MQM_MODEL` elsewhere) to start fresh, e.g. for each training-coverage run.
+
+| Env var | Values | Default |
+|---|---|---|
+| `MQM_MODE` | `learn` (record, never block) / `enforce` (block) / `monitor` (log only) | `learn` |
+| `MQM_MODEL` | path of model JSON | `./mqm-data/model.json` |
+| `MQM_SITE_KEY` | `callsite` / `collection` (coarser: one model per collection+method) | `callsite` |
+| `MQM_UNKNOWN` | `block` / `allow` queries from a site never seen while learning | `block` |
+| `MQM_LOG` | JSONL file, one line per blocked/flagged query (site, shape, reasons) | set in compose |
+
+For the harness: a blocked query returns **403** with `detail` naming the site and reasons, e.g.
+`MQM blocked query at users.findOne@app/routes.js:18: object where string expected at filter.password; new operator $ne at filter.password`.
+
+Notes and limitations:
+- Site keys contain line numbers: **relearn after editing `routes.js`**, or use `MQM_SITE_KEY=collection`.
+- Shapes are exact: a benign request whose shape was never seen in training (e.g. a missing field, a number
+  instead of a string) is blocked. That is the false-positive rate the coverage experiment measures.
+- Attacks that keep the shape get through (e.g. a malicious pattern inside a `$regex` the site already uses).
+- Not inspected: `insert*` documents, cursor modifiers such as `.sort(userInput)`, regex literals inside `$where`
+  (lexed as division, so they can only cause false positives, never misses).
+- Overhead (microbenchmark, M-series Mac): ~9 µs/query with `callsite` keying (mostly stack capture),
+  ~1-3 µs with `collection` keying.
 
 ## Seed data
 10 users (`admin`, `alice`, `bob`, ... `ivan`) with plaintext passwords and a `secret` field, and 26 products across
