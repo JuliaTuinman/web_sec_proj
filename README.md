@@ -79,10 +79,13 @@ Code: `testbed/app/protections/mqm.js` (entry, reads env) and `testbed/app/prote
 Learn, then enforce:
 ```
 PROTECTION=mqm MQM_MODE=learn docker compose up --build -d
-#   ...send ONLY benign traffic...
+./testbed/learn-traffic.sh        # sends ONLY benign traffic to every endpoint
 PROTECTION=mqm MQM_MODE=enforce docker compose up -d --force-recreate app
 ./testbed/smoke-test.sh
 ```
+Skipping the learn step (or editing `routes.js`, since site keys include line numbers) leaves MQM with no matching
+model, so **every** query, normal ones included, is blocked with "query site never seen in learn mode".
+Delete `testbed/mqm-data/model.json` and relearn. If you add an endpoint, add benign requests for it to `learn-traffic.sh`.
 The model is written to `testbed/mqm-data/model.json` (bind-mounted, gitignored), so it survives the restart.
 New shapes are saved immediately; counts are flushed within 1 s. Learning adds to an existing model: delete the file
 (or point `MQM_MODEL` elsewhere) to start fresh, e.g. for each training-coverage run.
