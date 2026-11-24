@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Benign-only traffic for MQM learn mode: exercises every endpoint with normal inputs.
-B=${1:-http://localhost:3000}
-j='-H Content-Type:application/json'
-for u in alice bob carol; do
-  curl -s -o /dev/null $j -d "{\"username\":\"$u\",\"password\":\"${u}123\"}" $B/login
-  curl -s -o /dev/null "$B/profile?username=$u"
-done
-for q in Laptop Mouse Book; do curl -s -o /dev/null "$B/search?q=$q"; done
-for c in books electronics toys; do curl -s -o /dev/null "$B/filter?category=$c&maxPrice=500"; done
-echo "learn traffic sent"
+# Benign-only traffic for MQM learn mode. One generator for learning and for
+# measuring, so a false positive can never be a difference between the two:
+# this just calls eval/traffic.js (--fraction F for the coverage runs).
+exec node "$(dirname "$0")/eval/traffic.js" benign --base "${1:-http://localhost:3000}" >/dev/null
