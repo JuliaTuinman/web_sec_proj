@@ -5,7 +5,7 @@ MQM sits between a Node.js app and MongoDB and watches every query.
 - **Enforce mode:** blocks and logs any query whose shape deviates (e.g. `password` becomes `{"$ne": null}`).
 
 This repo contains the vulnerable **testbed** app, the defenses we compare (none, express-mongo-sanitize,
-regex filter, MQM), and the evaluation harness.
+Mongoose `sanitizeFilter`, a regex filter, MQM), and the evaluation harness.
 
 > The testbed is **intentionally vulnerable**. Never deploy it or expose it beyond localhost.
 
@@ -14,7 +14,7 @@ regex filter, MQM), and the evaluation harness.
 |---|---|---|
 | Testbed app, Docker, seed data | Julia | Done, smoke-tested |
 | MQM (driver wrapping, shapes, modes) | Philip | Done, unit + end-to-end tested (`npm test`) |
-| Payloads, baselines, traffic generator | teammate | TODO: `protections/regex.js` (sanitizer already in) |
+| Payloads, baselines, traffic generator | Samson | Done (`eval/`, `protections/regex.js`, `protections/sanitizefilter.js`) |
 | Test harness, metrics, results table | teammate | TODO |
 
 ## Quick start
@@ -36,7 +36,7 @@ Useful commands (copy one line at a time, without any trailing comment):
 | `docker compose logs -f app` | follow app logs |
 | `docker compose ps -a` | container status (seed should show "Exited (0)") |
 | `docker compose run --rm seed` | reset data to the original seed |
-| `PROTECTION=sanitizer docker compose up -d --force-recreate app` | switch defense |
+| `PROTECTION=sanitizer docker compose up -d --force-recreate --build app` | switch defense (`--build` picks up code changes) |
 | `curl localhost:3000/health` | show which protection is active |
 
 Without Docker: `cd testbed && npm i && MONGO_URL=mongodb://localhost:27017 npm run seed && npm start`.
@@ -49,6 +49,8 @@ testbed/
   app/routes.js           4 vulnerable endpoints: /login /search /profile /filter
   app/db.js               ONE place the DB handle is created -> MQM wraps it here
   app/protections/        pluggable defenses chosen by PROTECTION env var
+  eval/payloads.js        35 attack payloads + 25 benign requests, each with its own oracle
+  eval/traffic.js         traffic generator: sends them, prints JSONL + a summary
   seed/seed.js            deterministic reseed (10 users, 26 products)
   smoke-test.sh           normal + attack request for each endpoint
 ```
@@ -79,13 +81,13 @@ Code: `testbed/app/protections/mqm.js` (entry, reads env) and `testbed/app/prote
 Learn, then enforce:
 ```
 PROTECTION=mqm MQM_MODE=learn docker compose up --build -d
-./testbed/learn-traffic.sh        # sends ONLY benign traffic to every endpoint
+node testbed/eval/traffic.js benign   # sends ONLY benign traffic (learn-traffic.sh calls this too)
 PROTECTION=mqm MQM_MODE=enforce docker compose up -d --force-recreate app
 ./testbed/smoke-test.sh
 ```
 Skipping the learn step (or editing `routes.js`, since site keys include line numbers) leaves MQM with no matching
 model, so **every** query, normal ones included, is blocked with "query site never seen in learn mode".
-Delete `testbed/mqm-data/model.json` and relearn. If you add an endpoint, add benign requests for it to `learn-traffic.sh`.
+Delete `testbed/mqm-data/model.json` and relearn. If you add an endpoint, add benign requests for it to `eval/payloads.js`.
 The model is written to `testbed/mqm-data/model.json` (bind-mounted, gitignored), so it survives the restart.
 New shapes are saved immediately; counts are flushed within 1 s. Learning adds to an existing model: delete the file
 (or point `MQM_MODEL` elsewhere) to start fresh, e.g. for each training-coverage run.
@@ -111,24 +113,75 @@ Notes and limitations:
 - Overhead (microbenchmark, M-series Mac): ~9 µs/query with `callsite` keying (mostly stack capture),
   ~1-3 µs with `collection` keying.
 
+## Payloads, baselines and traffic
+`testbed/eval/payloads.js` holds the requests, `testbed/eval/traffic.js` sends them.
+
+35 attacks, adapted from the MongoDB Injection Dataset, PayloadsAllTheThings and NoSQLMap and reduced to the ones that
+exploit this testbed: **all 35 succeed with `PROTECTION=none`**. Plus 25 benign requests over all 4 endpoints (valid
+logins, a form login, a wrong password, searches that hit and miss, an unknown user, filters with and without
+`maxPrice`), including text that only looks malicious (a pasted URL, `$100 Desk Lamp`) and two with a parameter left
+out, which have a query shape of their own. Every request carries its own oracle - `succeeded(status, body)` for an
+attack, `ok(status, body)` for a benign one - because the sanitizer baselines rewrite a query silently (200, no 403),
+so a status code is not enough.
+
+| Family | Count | What it is |
+|---|---|---|
+| `operator` | 26 | injected operators (`$ne`, `$gt`, `$regex`, `$in`, `$exists`, `$not`, ...) on `/login` (JSON and form body), `/search`, `/profile` |
+| `js` | 7 | JavaScript injected into the `$where` string of `/filter` (tautology, `return`, a function expression, a regex literal) |
+| `js-evasion` | 2 | the same, written as a ternary: none of the tokens a signature filter looks for |
+
+```
+node testbed/eval/traffic.js benign|attack|all [--base URL] [--fraction 0..1] [--repeat N]
+```
+JSONL on stdout (`{kind, name, family, path, status, ms, blocked, outcome}`; the first line records which protection
+answered), summary on stderr. `--fraction` sends the first F of the benign pool (training-coverage runs; a smaller F
+is always a subset of a larger one), `--repeat` sends everything N times (latency runs). `learn-traffic.sh` calls it
+too, so learning and measuring always use the same traffic.
+
+One pass over the 5 setups (MQM learned from the full benign pool first):
+
+| Setup | Attacks prevented | operator | js | js-evasion | False positives |
+|---|---|---|---|---|---|
+| `none` | 0/35 | 0/26 | 0/7 | 0/2 | 0/25 |
+| `sanitizer` (express-mongo-sanitize) | 26/35 | 26/26 | 0/7 | 0/2 | 0/25 |
+| `sanitizefilter` (Mongoose) | 35/35 | 26/26 | 7/7 | 2/2 | 5/25 - every legitimate `$where` query |
+| `regex` (signatures) | 33/35 | 26/26 | 7/7 | 0/2 | 1/25 - a URL pasted into the search box |
+| `mqm` (enforce) | 35/35 | 26/26 | 7/7 | 2/2 | 0/25 |
+
+MQM false positives vs training coverage (delete the model, learn with `--fraction F`, measure the full pool):
+10% -> 7/25, 50% -> 2/25, 100% -> 0/25. Latency is the `ms` field of every line; the harness owner runs that
+properly with `--repeat`.
+
+- `protections/regex.js` - 5 WAF-style rules (mongo operator, server-side JS, tautology, quote break, JS comment)
+  tested per key and value, not on the request as one JSON string: the quotes `JSON.stringify` adds match
+  `quote-break` on their own and block everything.
+- `protections/sanitizefilter.js` - Mongoose's `sanitizeFilter` applied to each filter at the driver level, since the
+  testbed has no ODM. It wraps operators in `$eq` and **throws on a top-level `$where`**, so it stops JS injection
+  but also rejects all 5 legitimate `/filter` requests (reported as 403).
+
+Known gap: no endpoint accepts an operator the app itself uses (the proposal's search that legitimately uses
+`$regex`), so the HTTP filters' false-positive rates are a lower bound and MQM's "precise, not blanket" claim only
+shows in `npm test`. Needs one more endpoint in `routes.js`, benign requests for it, and a relearn.
+
 ## Seed data
 10 users (`admin`, `alice`, `bob`, ... `ivan`) with plaintext passwords and a `secret` field, and 26 products across
 4 categories (electronics, books, clothing, home). Plaintext passwords are deliberate: the login endpoint compares
 them inside the query. Run `docker compose run --rm seed` to restore the original data.
 
 ## Integration points for teammates
-- **Selecting a defense:** the `PROTECTION` env var (`none` | `sanitizer` | `regex` | `mqm`) loads
+- **Selecting a defense:** the `PROTECTION` env var (`none` | `sanitizer` | `sanitizefilter` | `regex` | `mqm`) loads
   `testbed/app/protections/<name>.js`. A protection module may export:
   - `middleware(req, res, next)`: HTTP-level filter (sanitizer, regex).
-  - `wrapDb(db)` returning a db: driver-level wrapper (MQM). Called from `app/db.js`.
+  - `wrapDb(db)` returning a db: driver-level wrapper (MQM, sanitizefilter). Called from `app/db.js`.
 - **MQM:** create `protections/mqm.js` exporting `wrapDb(db)`. Wrap collection methods (`find`, `findOne`, ...).
   To block, throw an error with `err.mqmBlocked = true`; the routes turn it into a 403. Mode is
   `process.env.MQM_MODE` (`learn` | `enforce`).
-- **Regex baseline:** create `protections/regex.js` exporting `middleware`.
-- **Sanitizer baseline:** already in `protections/sanitizer.js`.
+- **Baselines:** `sanitizer.js` (express-mongo-sanitize), `regex.js` (signature matching), `sanitizefilter.js`
+  (Mongoose `sanitizeFilter`) - see "Payloads, baselines and traffic".
 - **Harness:** switch setups by restarting `app` with a different `PROTECTION`; `GET /health` confirms it.
-  Blocked requests return 403 (MQM, regex). The sanitizer neutralizes input silently, so judge an attack by the
-  response content (e.g. login `success:false`), not by status code alone.
+  Blocked requests return 403 (MQM, regex, and sanitizefilter on `$where`). The sanitizer neutralizes input
+  silently, so judge an attack by the response content (e.g. login `success:false`), not by status code alone -
+  `eval/payloads.js` carries an oracle per request, and `eval/traffic.js` prints the JSONL the harness needs.
 - **Resetting between runs:** `docker compose run --rm seed`.
 
 ## Troubleshooting

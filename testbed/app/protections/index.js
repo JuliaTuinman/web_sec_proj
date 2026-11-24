@@ -1,9 +1,9 @@
 // Selects the protection under test via PROTECTION env var:
-//   none | sanitizer | regex | mqm
+//   none | sanitizer | sanitizefilter | regex | mqm
 // Each protection module may export:
 //   middleware(req, res, next)  - HTTP-level filter (sanitizer, regex)
-//   wrapDb(db) -> db            - driver-level wrapper (mqm)
-// Teammates: drop regex.js / mqm.js in this folder; nothing else needs to change.
+//   wrapDb(db) -> db            - driver-level wrapper (mqm, sanitizefilter)
+// Adding a defense: drop <name>.js in this folder; nothing else needs to change.
 const NAME = (process.env.PROTECTION || 'none').toLowerCase();
 
 function load() {
