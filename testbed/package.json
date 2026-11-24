@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node app/server.js",
     "seed": "node seed/seed.js",
+    "traffic": "node traffic/generate.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
