@@ -14,7 +14,7 @@ regex filter, MQM), and the evaluation harness.
 |---|---|---|
 | Testbed app, Docker, seed data | Julia | Done, smoke-tested |
 | MQM (driver wrapping, shapes, modes) | Philip | Done, unit + end-to-end tested (`npm test`) |
-| Payloads, baselines, traffic generator | teammate | TODO: `protections/regex.js` (sanitizer already in) |
+| Payloads, baselines, traffic generator | Samson | Done: regex baseline, payload/baseline sets, traffic generator (`npm test`) |
 | Test harness, metrics, results table | teammate | TODO |
 
 ## Quick start
@@ -49,6 +49,8 @@ testbed/
   app/routes.js           4 vulnerable endpoints: /login /search /profile /filter
   app/db.js               ONE place the DB handle is created -> MQM wraps it here
   app/protections/        pluggable defenses chosen by PROTECTION env var
+  traffic/payloads.js     labeled benign + attack payload sets, with the oracles that judge a response
+  traffic/generate.js     traffic generator: sends the payload sets, reports what each defense did
   seed/seed.js            deterministic reseed (10 users, 26 products)
   smoke-test.sh           normal + attack request for each endpoint
 ```
@@ -85,7 +87,8 @@ PROTECTION=mqm MQM_MODE=enforce docker compose up -d --force-recreate app
 ```
 Skipping the learn step (or editing `routes.js`, since site keys include line numbers) leaves MQM with no matching
 model, so **every** query, normal ones included, is blocked with "query site never seen in learn mode".
-Delete `testbed/mqm-data/model.json` and relearn. If you add an endpoint, add benign requests for it to `learn-traffic.sh`.
+Delete `testbed/mqm-data/model.json` and relearn. If you add an endpoint, add benign requests for it to `learn-traffic.sh`
+(and its benign + attack cases to `traffic/payloads.js`).
 The model is written to `testbed/mqm-data/model.json` (bind-mounted, gitignored), so it survives the restart.
 New shapes are saved immediately; counts are flushed within 1 s. Learning adds to an existing model: delete the file
 (or point `MQM_MODEL` elsewhere) to start fresh, e.g. for each training-coverage run.
@@ -111,6 +114,58 @@ Notes and limitations:
 - Overhead (microbenchmark, M-series Mac): ~9 µs/query with `callsite` keying (mostly stack capture),
   ~1-3 µs with `collection` keying.
 
+## Baselines and traffic generator
+
+### Regex baseline (`PROTECTION=regex`)
+Code: `testbed/app/protections/regex.js`. HTTP middleware on the same hook as the sanitizer. It scans every key and
+string value in `req.body` and `req.query` (at any depth) and **blocks the whole request with 403**:
+
+| Rule | Applies to | Matches |
+|---|---|---|
+| `OPERATOR_KEY` | keys | a key starting with `$` (`$ne`, `$gt`, `$regex`, ...) |
+| `DOTTED_KEY` | keys | a key containing `.` |
+| `JS_BREAKOUT` | values | a quote, `;`, `\|\|`, `&&`, `=>`, `//` or `/*` |
+| `JS_KEYWORD` | values | the words `function`, `return`, `while`, `for`, `this`, `sleep` |
+| `OPERATOR_VALUE` | values | a `$word` inside a string |
+
+How it differs from the sanitizer: the sanitizer only strips `$`/`.` **keys** and lets the request run, so the
+`/filter` `$where` injection (a plain string value) gets through it. The regex baseline also scans **values**, so it
+catches that, and it rejects with 403 instead of neutralizing silently. Being a blocklist, it has known blind spots,
+which the payload sets measure on purpose:
+- **False positives:** benign input with a quote or keyword is blocked (a user named `o'brien`, a search for
+  `Books for kids`).
+- **Misses:** an injection that uses no listed characters gets through. `/filter` splices `maxPrice` in unquoted, so
+  `maxPrice=0 ? 0 : 1` or `maxPrice=0, 1` turns the whole `$where` into a truthy constant. MQM catches both, because
+  the JavaScript token structure changes.
+
+| Env var | Values | Default |
+|---|---|---|
+| `REGEX_MODE` | `block` (403) / `monitor` (allow, log what would be blocked) | `block` |
+| `REGEX_LOG` | JSONL file, one line per blocked/flagged request | set in compose |
+
+A blocked request returns `{"error":"blocked","detail":"regex filter blocked request: operator key $ne at body.password"}`.
+
+### Payload and baseline sets
+`testbed/traffic/payloads.js` holds labeled benign and attack cases for all four endpoints, each in the parsed form
+`req.body`/`req.query` takes. Each case carries an **oracle** that judges a response by content, not by status code
+alone, so a silently neutralized attack still counts as stopped.
+
+- `kind: 'benign'`: normal traffic. Cases marked `edge` are legitimate inputs a blocklist is likely to trip on.
+- `kind: 'attack'`: injections. Cases marked `evasion` exploit the app while avoiding every regex signature.
+
+### Traffic generator
+Sends the payload sets to one running app and reports what the active defense did with each case:
+`served` or `FALSE-POS` for benign cases, `stopped` or `EXPLOITED` for attacks.
+```
+cd testbed && npm run traffic                                    # human-readable report
+cd testbed && npm run traffic -- http://localhost:3000 --json   # machine-readable, one entry per request
+docker compose exec app npm run traffic                          # no Node on the host
+```
+Filters: `--only login,search` and `--kind benign|attack`. Run it against `PROTECTION=none` first to check the
+corpus: every attack should report `EXPLOITED` and every benign case `served`.
+It tests one configuration per run. Switching protections and building the comparison table is the harness's job;
+`--json` output is meant to feed it.
+
 ## Seed data
 10 users (`admin`, `alice`, `bob`, ... `ivan`) with plaintext passwords and a `secret` field, and 26 products across
 4 categories (electronics, books, clothing, home). Plaintext passwords are deliberate: the login endpoint compares
@@ -124,11 +179,12 @@ them inside the query. Run `docker compose run --rm seed` to restore the origina
 - **MQM:** create `protections/mqm.js` exporting `wrapDb(db)`. Wrap collection methods (`find`, `findOne`, ...).
   To block, throw an error with `err.mqmBlocked = true`; the routes turn it into a 403. Mode is
   `process.env.MQM_MODE` (`learn` | `enforce`).
-- **Regex baseline:** create `protections/regex.js` exporting `middleware`.
-- **Sanitizer baseline:** already in `protections/sanitizer.js`.
+- **Regex baseline:** `protections/regex.js` exports `middleware` (see "Baselines and traffic generator").
+- **Sanitizer baseline:** `protections/sanitizer.js`, express-mongo-sanitize with its default config.
 - **Harness:** switch setups by restarting `app` with a different `PROTECTION`; `GET /health` confirms it.
   Blocked requests return 403 (MQM, regex). The sanitizer neutralizes input silently, so judge an attack by the
-  response content (e.g. login `success:false`), not by status code alone.
+  response content (e.g. login `success:false`), not by status code alone. The payload oracles already do this:
+  run `npm run traffic -- --json` for each setup and aggregate the `outcome` fields.
 - **Resetting between runs:** `docker compose run --rm seed`.
 
 ## Troubleshooting
